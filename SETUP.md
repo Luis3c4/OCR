@@ -82,12 +82,6 @@ curl -X POST http://localhost:8001/ocr/extract \
   "numero_operacion": "123456789",
   "fecha": "2026-05-05",
   "banco": "BCP",
-  "confidence": {
-    "monto": 0.97,
-    "numero_operacion": 0.95,
-    "fecha": 0.92,
-    "banco": 0.88
-  }
 }
 ```
 
