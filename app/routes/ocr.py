@@ -95,6 +95,7 @@ def extract_transfer_data(
                 "monto": parsed["monto"],
                 "numero_operacion": parsed["numero_operacion"],
                 "banco": parsed["banco"],
+                "fecha_transferencia": parsed["fecha_transferencia"],
                 "raw_text": raw_text,
             },
         }

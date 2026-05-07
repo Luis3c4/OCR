@@ -131,16 +131,104 @@ def _split_source_dest(raw_text: str) -> tuple[str, str]:
     return raw_text, ""
 
 
+# ============================================================
+# EXTRACCIÓN DE FECHA Y HORA DE TRANSFERENCIA
+# ============================================================
+
+# DD/MM/YY[YY] HH:MM[:SS] [AM/PM]  →  mismo renglón
+_RE_FULL_SLASH_DT = re.compile(
+    r"\b(\d{2}/\d{2}/\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[aApP]\.?\s*[mM]\.?)?)\b",
+    re.IGNORECASE,
+)
+
+# "11 marzo 2026, 15:47" | "25 Mar 2026  04:09 PM" | "23 mar., 04:42 p. m."
+_RE_FULL_MONTH_DT = re.compile(
+    r"(\d{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)[a-z\u00e1\u00e9\u00ed\u00f3\u00fa.]*"
+    r"\.?\s*(?:(?:de\s+)?\d{4})?\s*,?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[aApP]\.?\s*[mM]\.?)?)",
+    re.IGNORECASE,
+)
+
+_RE_DATE_SLASH_ONLY = re.compile(r"\b(\d{2}/\d{2}/\d{2,4})\b")
+_RE_TIME_ONLY = re.compile(r"\b(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[aApP]\.?\s*[mM]\.?)?)\b")
+
+# BBVA two-column: "24 marzo" alone on a line, then "2026, HH:MM" a few lines later
+_RE_DAY_MONTH_ONLY = re.compile(
+    r"^\s*(\d{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)"
+    r"[a-z\u00e1\u00e9\u00ed\u00f3\u00fa.]*\.?)\s*$",
+    re.IGNORECASE,
+)
+_RE_YEAR_TIME = re.compile(
+    r"\b(\d{4})\s*,?\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[aApP]\.?\s*[mM]\.?)?)\b",
+)
+
+
+def _extract_fecha_transferencia(raw_text: str) -> Optional[str]:
+    """Extrae fecha y hora de la transferencia preservando el formato original del comprobante.
+
+    Soporta los formatos más comunes de la banca peruana:
+    - DD/MM/YYYY HH:MM:SS           (Banco de la Nación)
+    - DD/MM/YY HH:MM                (Caja Arequipa)
+    - D mes YYYY, HH:MM             (BBVA / Scotiabank verde)
+    - D Mes YYYY  HH:MM AM/PM       (Interbank)
+    - D mes., HH:MM p. m.           (Scotiabank)
+    - Fecha y Hora en líneas separadas  (Falabella)
+    """
+    lines = [ln.strip() for ln in raw_text.splitlines()]
+
+    # Paso 1: fecha + hora en el mismo renglón (slash)
+    for line in lines:
+        m = _RE_FULL_SLASH_DT.search(line)
+        if m:
+            return m.group(1).strip()
+
+    # Paso 2: fecha + hora en el mismo renglón (nombre de mes)
+    for line in lines:
+        m = _RE_FULL_MONTH_DT.search(line)
+        if m:
+            return m.group(1).strip()
+
+    # Paso 3: texto multi-línea — concatena renglones consecutivos (ej. BBVA)
+    for i in range(len(lines) - 1):
+        combined = lines[i] + " " + lines[i + 1]
+        m = _RE_FULL_MONTH_DT.search(combined)
+        if m:
+            return m.group(1).strip()
+
+    # Paso 3b: BBVA layout de dos columnas — "24 marzo" en un renglón,
+    # "2026, 10:24" separado por 1-3 renglones de etiquetas (ej. "operación")
+    for i, line in enumerate(lines):
+        m_dm = _RE_DAY_MONTH_ONLY.search(line)
+        if m_dm:
+            day_month = m_dm.group(1).strip()
+            for j in range(i + 1, min(i + 5, len(lines))):
+                m_yt = _RE_YEAR_TIME.search(lines[j])
+                if m_yt:
+                    return f"{day_month} {m_yt.group(1)}, {m_yt.group(2).strip()}"
+
+    # Paso 4: fecha en un renglón, hora en un renglón cercano (ej. Falabella)
+    for i, line in enumerate(lines):
+        m_date = _RE_DATE_SLASH_ONLY.search(line)
+        if m_date:
+            date_str = m_date.group(1)
+            for j in range(i + 1, min(i + 6, len(lines))):
+                m_time = _RE_TIME_ONLY.search(lines[j])
+                if m_time:
+                    return f"{date_str} {m_time.group(1).strip()}"
+            return date_str
+
+    return None
+
+
 def parse_transfer_text(raw_text: str) -> dict:
     """
-    Extrae monto, número de operación y banco de texto OCR crudo.
+    Extrae monto, número de operación, banco y fecha/hora de texto OCR crudo.
 
     Returns:
         {
             "monto": "4550.00" | None,
             "numero_operacion": "04349309" | None,
             "banco": "INTERBANK" | None,
-            "confidence": { "monto": float, "numero_operacion": float, "banco": float }
+            "fecha_transferencia": "24 marzo 2026, 10:24" | None,
         }
     """
     text_upper = raw_text.upper()
@@ -197,9 +285,13 @@ def parse_transfer_text(raw_text: str) -> dict:
                     monto_found = normalized
                     break
 
+    # ── FECHA Y HORA DE TRANSFERENCIA ────────────────────────
+    fecha_found = _extract_fecha_transferencia(raw_text)
+
     return {
         "monto": monto_found,
         "numero_operacion": op_found,
         "banco": banco_found,
+        "fecha_transferencia": fecha_found,
     }
 
