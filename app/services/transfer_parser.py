@@ -35,7 +35,7 @@ _APP_PHRASES: list[tuple[str, str]] = [
     ("TRANSFERISTE",        "INTERBANK"),
     ("YAPEASTE",            "YAPE"),
     ("PLIN",                "PLIN"),
-    ("IMPORTE TRANSFERIDO", "BBVA"),
+    ("IMPORTE TRANSFER",   "BBVA"),   # cubre TRANSFERIDO y TRANSFERIDA
     ("DE LA NACION",        "BANCO DE LA NACION"),
     ("DE LA NACIÓN",        "BANCO DE LA NACION"),
     ("EL BANCO DE TODOS",   "BANCO DE LA NACION"),
@@ -161,6 +161,13 @@ _RE_YEAR_TIME = re.compile(
     r"\b(\d{4})\s*,?\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[aApP]\.?\s*[mM]\.?)?)\b",
 )
 
+# BBVA variant: "08 mayo 2026," on one line, time on a nearby line
+_RE_DATE_MONTH_YEAR_ONLY = re.compile(
+    r"(\d{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)"
+    r"[a-z\u00e1\u00e9\u00ed\u00f3\u00fa.]*\.?\s*(?:de\s+)?\d{4}),?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _extract_fecha_transferencia(raw_text: str) -> Optional[str]:
     """Extrae fecha y hora de la transferencia preservando el formato original del comprobante.
@@ -194,8 +201,7 @@ def _extract_fecha_transferencia(raw_text: str) -> Optional[str]:
         if m:
             return m.group(1).strip()
 
-    # Paso 3b: BBVA layout de dos columnas — "24 marzo" en un renglón,
-    # "2026, 10:24" separado por 1-3 renglones de etiquetas (ej. "operación")
+    # Paso 3b: BBVA layout — "24 marzo" solo en un renglón, "2026, HH:MM" unos renglones después
     for i, line in enumerate(lines):
         m_dm = _RE_DAY_MONTH_ONLY.search(line)
         if m_dm:
@@ -204,6 +210,17 @@ def _extract_fecha_transferencia(raw_text: str) -> Optional[str]:
                 m_yt = _RE_YEAR_TIME.search(lines[j])
                 if m_yt:
                     return f"{day_month} {m_yt.group(1)}, {m_yt.group(2).strip()}"
+
+    # Paso 3c: BBVA variant — "08 mayo 2026," en un renglón, hora sola unos renglones después
+    for i, line in enumerate(lines):
+        m_dmy = _RE_DATE_MONTH_YEAR_ONLY.search(line)
+        if m_dmy:
+            date_str = m_dmy.group(1).strip()
+            for j in range(i + 1, min(i + 5, len(lines))):
+                m_time = _RE_TIME_ONLY.search(lines[j])
+                if m_time:
+                    return f"{date_str}, {m_time.group(1).strip()}"
+            return date_str
 
     # Paso 4: fecha en un renglón, hora en un renglón cercano (ej. Falabella)
     for i, line in enumerate(lines):
@@ -255,8 +272,24 @@ def parse_transfer_text(raw_text: str) -> dict:
 
     # Alta confianza: keyword explícito cerca — itera todos los matches hasta encontrar uno válido
     for m_ctx in _RE_OPERACION_CTX.finditer(raw_text):
-        op_found = _normalize_op_number(m_ctx.group(1))
-        if op_found:
+        candidate = _normalize_op_number(m_ctx.group(1))
+        if candidate:
+            # Buscar continuación del número en las líneas siguientes al match
+            # (BBVA parte el número en dos líneas con la etiqueta "operación" en medio)
+            after = raw_text[m_ctx.end():]
+            for next_line in after.splitlines()[:5]:
+                stripped = next_line.strip()
+                if not stripped:
+                    continue  # línea vacía, saltar
+                if re.fullmatch(r'\d{1,8}', stripped) and len(candidate) + len(stripped) <= 25:
+                    # Es una cola de dígitos corta → parte del mismo número
+                    candidate = candidate + stripped
+                    break
+                elif not any(c.isdigit() for c in stripped):
+                    continue  # línea de etiqueta pura (ej. "operación"), saltar
+                else:
+                    break  # línea con contenido mixto → detener
+            op_found = candidate
             break
 
     # Fallback: dígito aislado de 6-14 cifras que no sea parte de un número de cuenta
